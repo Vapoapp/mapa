@@ -376,6 +376,10 @@ const PROXIES = [
   { name:'cors.bridged.cc',  buildUrl: target => 'https://cors.bridged.cc/' + target,                                           json:false, extract: d => d },
 ];
 
+// ── CACHE GITHUB ACTIONS ──────────────────────────────────────────────────────
+const CACHE_URL = 'https://raw.githubusercontent.com/vapoapp/mapa/main/data/vessels.json';
+const CACHE_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutos
+
 // ── STATE ─────────────────────────────────────────────────────────────────────
 let monInterval=null, countInterval=null, uptInterval=null;
 let running=false, startTs=null;
@@ -707,6 +711,20 @@ function dismissAlert() {
   log('✓ Alerta confirmado — monitor encerrado.','ok');
 }
 
+// ── CACHE FETCH ───────────────────────────────────────────────────────────────
+async function fetchFromCache() {
+  try {
+    const res = await fetch(CACHE_URL, { cache:'no-store', signal:AbortSignal.timeout(8000) });
+    if(!res.ok) return null;
+    const data = await res.json();
+    if(!data || !data.updatedAt || !Array.isArray(data.vessels)) return null;
+    if(Date.now() - new Date(data.updatedAt).getTime() > CACHE_MAX_AGE_MS) return null;
+    return data;
+  } catch(e) {
+    return null;
+  }
+}
+
 // ── CHECK PARALELO ────────────────────────────────────────────────────────────
 async function check() {
   const raw = document.getElementById('vesselName').value.trim();
@@ -717,30 +735,39 @@ async function check() {
   // Marcar todos como "verificando"
   PORTOS.forEach(p=>setPortoStatus(p.id,'','...'));
 
-  // Busca paralela
-  const results = await Promise.allSettled(
-    PORTOS.map(porto =>
-      fetchComRetry(porto.url, 3)
-        .then(html => ({ porto, vessels: parseVessels(html, porto.nome) }))
-    )
-  );
+  let allVessels=[];
+  let errCount=0;
+  let results=null;
+
+  // Tenta cache do GitHub Actions primeiro (mais confiável que proxies públicos)
+  const cached = await fetchFromCache();
+  if(cached) {
+    const ageS = Math.round((Date.now() - new Date(cached.updatedAt).getTime()) / 1000);
+    log('📦 Cache GitHub Actions ('+ageS+'s atrás) — dados frescos sem proxy', 'ok');
+    allVessels = cached.vessels;
+  } else {
+    // Fallback: scraping via proxies públicos
+    log('⚡ Cache indisponível — consultando via proxies...', 'warn');
+    results = await Promise.allSettled(
+      PORTOS.map(porto =>
+        fetchComRetry(porto.url, 3)
+          .then(html => ({ porto, vessels: parseVessels(html, porto.nome) }))
+      )
+    );
+    results.forEach((result, i) => {
+      const porto=PORTOS[i];
+      if(result.status==='fulfilled') {
+        allVessels=allVessels.concat(result.value.vessels);
+      } else {
+        errCount++;
+        setPortoStatus(porto.id,'err','ERRO');
+        log('✗ ['+porto.nome+'] '+result.reason,'err');
+      }
+    });
+  }
 
   totalChecks++;
   document.getElementById('sChecks').textContent=totalChecks;
-
-  let allVessels=[];
-  let errCount=0;
-
-  results.forEach((result, i) => {
-    const porto=PORTOS[i];
-    if(result.status==='fulfilled') {
-      allVessels=allVessels.concat(result.value.vessels);
-    } else {
-      errCount++;
-      setPortoStatus(porto.id,'err','ERRO');
-      log('✗ ['+porto.nome+'] '+result.reason,'err');
-    }
-  });
 
   // Filtra manobras dentro da janela de 2h antes do início da busca
   const searchStart = startTs ? new Date(startTs - 2 * 60 * 60 * 1000) : null;
@@ -767,7 +794,8 @@ async function check() {
 
   // Atualiza status dos portos
   PORTOS.forEach((porto, i) => {
-    if(results[i].status==='fulfilled') {
+    const fulfilled = cached ? true : (results && results[i] && results[i].status==='fulfilled');
+    if(fulfilled) {
       const portFiltered = filteredVessels.filter(v => v.porto === porto.nome);
       const portFound = allFound.filter(v => v.porto === porto.nome);
       if(portFound.length > 0) {
