@@ -737,6 +737,7 @@ async function check() {
 
   let allVessels=[];
   let errCount=0;
+  let results=null;
 
   // Tenta cache do GitHub Actions primeiro (mais confiável que proxies públicos)
   const cached = await fetchFromCache();
@@ -747,7 +748,7 @@ async function check() {
   } else {
     // Fallback: scraping via proxies públicos
     log('⚡ Cache indisponível — consultando via proxies...', 'warn');
-    const results = await Promise.allSettled(
+    results = await Promise.allSettled(
       PORTOS.map(porto =>
         fetchComRetry(porto.url, 3)
           .then(html => ({ porto, vessels: parseVessels(html, porto.nome) }))
@@ -793,7 +794,8 @@ async function check() {
 
   // Atualiza status dos portos
   PORTOS.forEach((porto, i) => {
-    if(results[i].status==='fulfilled') {
+    const fulfilled = cached ? true : (results && results[i] && results[i].status==='fulfilled');
+    if(fulfilled) {
       const portFiltered = filteredVessels.filter(v => v.porto === porto.nome);
       const portFound = allFound.filter(v => v.porto === porto.nome);
       if(portFound.length > 0) {
